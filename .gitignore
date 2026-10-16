@@ -54,3 +54,6 @@ temp
 cmake-build-debug
 .idea
 log
+
+# env file
+.env
