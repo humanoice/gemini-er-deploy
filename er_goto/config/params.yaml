@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# er_goto tunables. target, dry_run and save_debug_images come from the launch file.
+# Keep floats written with a decimal point: ROS rejects an int for a float parameter.
+
+er_goto:
+  ros__parameters:
+    # Gemini
+    model: "gemini-robotics-er-2-preview"
+    thinking_level: "medium"     # latency vs accuracy; "" leaves it to the model default
+    gemini_timeout: 15.0         # s per request
+    gemini_retries: 1            # extra attempts on timeout / server error / 429
+    max_api_errors: 3            # consecutive failed LOOKs before giving up
+
+    # Stop-look-move loop
+    stop_dist: 0.8               # m, stop this far in front of the target
+    align_tol: 0.15              # rad (~9 deg), turn first if bearing exceeds this
+    turn_speed: 0.4              # rad/s
+    walk_speed: 0.25             # m/s, keep low for first tests
+    max_step: 1.0                # m, longest walk per LOOK
+    min_step: 0.15               # m, shortest walk, so tiny steps still move the robot
+    settle_time: 0.5             # s standing still before taking the photo
+    search_turn_time: 1.5        # s per SEARCH rotation (~34 deg at 0.4 rad/s)
+    max_search: 10               # consecutive misses before giving up (about one full turn)
+    max_iterations: 40           # hard cap on LOOK cycles
+    camera_yaw_offset: 0.0       # rad, camera mounting yaw (+ = camera turned left)
+    depth_patch_radius: 5        # px, median depth patch around the Gemini point
+
+    # Safety
+    max_linear_x: 0.4            # m/s, node clamp; default policy allows up to 0.6
+    max_angular_z: 0.6           # rad/s, node clamp; default policy allows up to 0.8
+    publish_rate: 20.0           # Hz while a motion is active
+    max_motion_time: 5.0         # s, cap on any single TURN / WALK / SEARCH
+    max_run_time: 300.0          # s, total run time limit
+    max_frame_age: 0.5           # s, walking aborts if depth or RGB is older
+    watchdog_timeout: 0.5        # s without a command during a motion -> zero
+    obstacle_dist: 0.5           # m, emergency stop while walking
+    obstacle_min_depth: 0.1      # m, ignore depth readings below this

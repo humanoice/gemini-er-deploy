@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# RealSense D435i parameters for rs_launch.py (config_file), used by er_goto.
+# Colour on, depth aligned to colour. src/camera/configs/realsense_d435i.yaml turns
+# colour off for the parkour policy, so do not run tools/start_camera.sh at the same time.
+# Topics: /camera/camera/color/image_raw
+#         /camera/camera/aligned_depth_to_color/image_raw
+#         /camera/camera/color/camera_info
+
+camera_namespace: "camera"
+camera_name: "camera"
+enable_color: true
+enable_depth: true
+align_depth.enable: true
+rgb_camera.color_profile: "640x480x15"
+depth_module.depth_profile: "640x480x15"
+enable_gyro: false
+enable_accel: false
+publish_tf: false
+log_level: "info"
+output: "screen"
