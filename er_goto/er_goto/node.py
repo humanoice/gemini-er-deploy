@@ -49,7 +49,7 @@ PARAMETERS = {
     'dry_run_topic': '/cmd_vel_test',
     # Gemini
     'model': 'gemini-robotics-er-2-preview',
-    'thinking_level': 'medium',
+    'thinking_level': 'low',
     'gemini_timeout': 15.0,
     'gemini_retries': 1,
     'max_api_errors': 3,
@@ -57,11 +57,12 @@ PARAMETERS = {
     # Control
     'stop_dist': 0.8,
     'align_tol': 0.15,
-    'turn_speed': 0.4,
-    'walk_speed': 0.25,
-    'max_step': 1.0,
-    'min_step': 0.15,
-    'settle_time': 0.5,
+    'turn_in_place_angle': 0.5,
+    'turn_speed': 0.5,
+    'walk_speed': 0.35,
+    'max_step': 2.0,
+    'min_step': 0.3,
+    'settle_time': 0.3,
     'search_turn_time': 1.5,
     'max_search': 10,
     'max_iterations': 40,
@@ -69,10 +70,10 @@ PARAMETERS = {
     'depth_patch_radius': 5,
     'depth_scale': 0.001,
     # Safety
-    'max_linear_x': 0.4,
+    'max_linear_x': 0.5,
     'max_angular_z': 0.6,
     'publish_rate': 20.0,
-    'max_motion_time': 5.0,
+    'max_motion_time': 8.0,
     'max_run_time': 300.0,
     'max_frame_age': 0.5,
     'watchdog_timeout': 0.5,
@@ -113,7 +114,8 @@ class ErGotoNode(Node):
         p = self.p
         self.target = control.extract_target(p['target'])
         self.tuning = control.Tuning(
-            stop_dist=p['stop_dist'], align_tol=p['align_tol'], turn_speed=p['turn_speed'],
+            stop_dist=p['stop_dist'], align_tol=p['align_tol'],
+            turn_in_place_angle=p['turn_in_place_angle'], turn_speed=p['turn_speed'],
             walk_speed=p['walk_speed'], max_step=p['max_step'], min_step=p['min_step'],
             search_turn_time=p['search_turn_time'], max_motion_time=p['max_motion_time'])
 
@@ -171,6 +173,8 @@ class ErGotoNode(Node):
                      'gemini_timeout', 'publish_rate', 'startup_timeout', 'depth_scale'):
             if not p[name] > 0.0:
                 errors.append(f'{name} must be > 0')
+        if p['turn_in_place_angle'] < p['align_tol']:
+            errors.append('turn_in_place_angle must be >= align_tol')
         if p['min_step'] > p['max_step']:
             errors.append('min_step must be <= max_step')
         if p['publish_rate'] > 0.0 and 2.0 / p['publish_rate'] >= p['watchdog_timeout']:

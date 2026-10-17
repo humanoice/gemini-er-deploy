@@ -8,7 +8,7 @@ The node runs a stop-look-move loop, so Gemini's answer is never stale:
 
 1. **LOOK**: publish zero for `settle_time`, take a fresh RGB frame, ask Gemini to point at the target (`[y, x]`, normalized 0-1000).
 2. Convert the point to a pixel, then to a bearing (from the camera intrinsics) and a distance (median of the aligned depth around the pixel).
-3. **DONE** if closer than `stop_dist` and within `align_tol`; **TURN** if the bearing is larger than `align_tol`; otherwise **WALK** `min(distance - stop_dist, max_step)`. Each motion is open loop, bounded in time, and ends with a zero `Twist`.
+3. **DONE** if closer than `stop_dist` and within `align_tol`; **TURN** in place if the bearing is larger than `turn_in_place_angle` (or larger than `align_tol` once closer than `stop_dist`); otherwise **WALK** `min(distance - stop_dist, max_step)`, turning at the same time so the walk ends facing the target. Each motion is open loop, bounded in time, and ends with a zero `Twist`.
 4. **SEARCH** (rotate left for `search_turn_time`) when the target is not visible; give up after `max_search` misses in a row.
 5. Back to LOOK, up to `max_iterations` cycles and `max_run_time` seconds.
 
@@ -100,4 +100,4 @@ If the robot turns the wrong way in stage 4, fix the sign in `geometry.pixel_to_
 
 ## Parameters
 
-All tunables are in `config/params.yaml` with comments; the defaults follow the plan (`stop_dist` 0.8 m, `align_tol` 0.15 rad, `turn_speed` 0.4 rad/s, `walk_speed` 0.25 m/s, `max_step` 1.0 m, `thinking_level` medium, 15 s Gemini timeout). Two additions: `min_step` (0.15 m) makes the last short walks long enough for the policy to actually step, and `max_linear_x` / `max_angular_z` (0.4 / 0.6) are the node's clamps, below the policy's own limits for first tests. Topic names, `depth_scale`, `jpeg_quality` and `debug_dir` have defaults in `node.py` and can be overridden the same way.
+All tunables are in `config/params.yaml` with comments. Main defaults: `stop_dist` 0.8 m, `align_tol` 0.15 rad, `turn_in_place_angle` 0.5 rad, `turn_speed` 0.5 rad/s, `walk_speed` 0.35 m/s, `max_step` 2.0 m, `max_motion_time` 8 s, `thinking_level` low, 15 s Gemini timeout. `min_step` (0.3 m) makes the last short walks long enough for the policy to actually step, and `max_linear_x` / `max_angular_z` (0.5 / 0.6) are the node's clamps, below the policy's own limits (0.6 / 0.8). Topic names, `depth_scale`, `jpeg_quality` and `debug_dir` have defaults in `node.py` and can be overridden the same way.

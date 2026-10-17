@@ -67,7 +67,7 @@ def main():
     parser.add_argument('--out', type=Path, default=Path('snapshot_out'),
                         help='directory for annotated copies (default: ./snapshot_out)')
     parser.add_argument('--model', default=DEFAULT_MODEL)
-    parser.add_argument('--thinking-level', default='medium')
+    parser.add_argument('--thinking-level', default='low')
     parser.add_argument('--timeout', type=float, default=15.0, help='seconds per request')
     parser.add_argument('--width', type=int, default=640,
                         help='resize photos to this width like the robot camera (0 = keep)')

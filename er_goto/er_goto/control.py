@@ -20,7 +20,8 @@ _COMMAND_PREFIX = re.compile(
 @dataclass(frozen=True)
 class Tuning:
     stop_dist: float         # m, stop this far in front of the target
-    align_tol: float         # rad, turn first if |bearing| is larger
+    align_tol: float         # rad, DONE only within this; closer than stop_dist, turn if larger
+    turn_in_place_angle: float  # rad, turn in place if |bearing| is larger, else turn while walking
     turn_speed: float        # rad/s
     walk_speed: float        # m/s
     max_step: float          # m, longest walk per LOOK
@@ -44,11 +45,12 @@ def decide(bearing, distance, tuning):
     bearing: rad, + = left. distance: m, or None when depth is unknown.
     """
     t = tuning
-    if abs(bearing) > t.align_tol:
+    close = distance is not None and distance <= t.stop_dist
+    if abs(bearing) > (t.align_tol if close else t.turn_in_place_angle):
         duration = min(abs(bearing) / t.turn_speed, t.max_motion_time)
         return Step(TURN, angular_z=math.copysign(t.turn_speed, bearing), duration=duration,
                     reason=f'bearing {math.degrees(bearing):+.1f} deg')
-    if distance is not None and distance <= t.stop_dist:
+    if close:
         return Step(DONE, reason=f'{distance:.2f} m away, aligned')
     if distance is None:
         step = t.max_step
@@ -57,8 +59,11 @@ def decide(bearing, distance, tuning):
         step = min(max(distance - t.stop_dist, t.min_step), t.max_step)
         reason = f'{distance:.2f} m away'
     duration = min(step / t.walk_speed, t.max_motion_time)
-    return Step(WALK, linear_x=t.walk_speed, duration=duration,
-                reason=f'{reason}, step {step:.2f} m')
+    # Turn while walking, so the walk ends roughly facing the target instead of
+    # needing a separate short TURN that the gait barely follows.
+    angular_z = min(max(bearing / duration, -t.turn_speed), t.turn_speed)
+    return Step(WALK, linear_x=t.walk_speed, angular_z=angular_z, duration=duration,
+                reason=f'{reason}, step {step:.2f} m, bearing {math.degrees(bearing):+.1f} deg')
 
 
 def search_step(tuning):
