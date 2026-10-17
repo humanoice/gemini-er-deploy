@@ -46,7 +46,7 @@ Inference reads motor and IMU state through the robot interface, converts policy
 
 ## Walk to the Chair
 
-`er_goto` repeats a stop-look-move loop. The robot stands still while Gemini Robotics-ER points at the chair in the camera image. Local code turns that point into a bearing and a distance from the aligned depth image. The robot then turns or walks for a short, bounded time and looks again, until it stands about 0.8 m in front of the chair.
+`er_goto` walks while it looks. Gemini Robotics-ER points at the chair in the camera image on a background thread, and local code turns that point into a bearing and a distance from the aligned depth image. Between answers the robot keeps walking toward the newest one, corrected by dead reckoning for how far it moved since that photo was taken. It stops only to confirm arrival, to look again when the answer is too old or the path is blocked, and to search, and ends about 0.8 m in front of the chair.
 
 ### One-time Setup on the RDK X5
 

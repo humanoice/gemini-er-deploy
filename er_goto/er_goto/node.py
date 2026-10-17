@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """ROS 2 node: walk the robot to an object that Gemini Robotics-ER points at.
 
-Stop, look, move: the robot stands still while Gemini answers "where is the
-target in this image", then turns or walks for a short, bounded time and looks
-again. Velocities go to /cmd_vel, which inference_node holds forever, so every
-motion ends with a zero Twist and a watchdog covers a stalled main loop.
+Look while walking: Gemini answers "where is the target in this image" on a
+background thread while the control loop keeps publishing at publish_rate,
+steering toward the newest answer by dead reckoning (control.Navigator). The
+robot stops only to confirm arrival, when the newest answer is too old, when the
+path is blocked, and to search. Velocities go to /cmd_vel, which inference_node
+holds forever, so the node publishes zero on exit and a watchdog covers a
+stalled control loop.
 """
 
 import math
@@ -56,12 +59,14 @@ PARAMETERS = {
     'jpeg_quality': 90,
     # Control
     'stop_dist': 0.8,
+    'arrive_tol': 0.2,
     'align_tol': 0.15,
     'turn_in_place_angle': 0.5,
+    'k_turn': 1.5,
     'turn_speed': 0.5,
     'walk_speed': 0.35,
-    'max_step': 2.0,
-    'min_step': 0.3,
+    'min_walk_speed': 0.15,
+    'slow_dist': 0.5,
     'settle_time': 0.3,
     'search_turn_time': 1.5,
     'max_search': 10,
@@ -73,7 +78,8 @@ PARAMETERS = {
     'max_linear_x': 0.5,
     'max_angular_z': 0.6,
     'publish_rate': 20.0,
-    'max_motion_time': 8.0,
+    'max_blind_time': 10.0,
+    'max_blind_dist': 2.5,
     'max_run_time': 300.0,
     'max_frame_age': 0.5,
     'watchdog_timeout': 0.5,
@@ -102,6 +108,32 @@ class LookResult:
     distance: float  # m, or None when depth is unknown
 
 
+class Background:
+    """fn(*args) on a daemon thread, so that exiting never waits for a Gemini call."""
+
+    def __init__(self, fn, *args):
+        self._done = threading.Event()
+        self._result = None
+        self._error = None
+        threading.Thread(target=self._run, args=(fn, args), daemon=True).start()
+
+    def _run(self, fn, args):
+        try:
+            self._result = fn(*args)
+        except Exception as exc:  # re-raised in the control loop by result()
+            self._error = exc
+        finally:
+            self._done.set()
+
+    def done(self):
+        return self._done.is_set()
+
+    def result(self):
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
 class ErGotoNode(Node):
 
     def __init__(self):
@@ -114,16 +146,19 @@ class ErGotoNode(Node):
         p = self.p
         self.target = control.extract_target(p['target'])
         self.tuning = control.Tuning(
-            stop_dist=p['stop_dist'], align_tol=p['align_tol'],
-            turn_in_place_angle=p['turn_in_place_angle'], turn_speed=p['turn_speed'],
-            walk_speed=p['walk_speed'], max_step=p['max_step'], min_step=p['min_step'],
-            search_turn_time=p['search_turn_time'], max_motion_time=p['max_motion_time'])
+            stop_dist=p['stop_dist'], arrive_tol=p['arrive_tol'], align_tol=p['align_tol'],
+            turn_in_place_angle=p['turn_in_place_angle'], k_turn=p['k_turn'],
+            turn_speed=p['turn_speed'], walk_speed=p['walk_speed'],
+            min_walk_speed=p['min_walk_speed'], slow_dist=p['slow_dist'],
+            settle_time=p['settle_time'], search_turn_time=p['search_turn_time'],
+            max_search=p['max_search'], max_blind_time=p['max_blind_time'],
+            max_blind_dist=p['max_blind_dist'])
 
         self._pub_lock = threading.RLock()  # re-entrant: the signal handler path may nest
         self._state_lock = threading.Lock()
         self._frames = {}  # 'rgb' / 'depth' / 'info' -> Frame
-        self._motion_active = False
-        self._last_motion_publish = 0.0
+        self._loop_active = False  # the control loop is publishing; the watchdog checks it
+        self._last_loop_publish = 0.0
         self._watchdog_tripped = False
         self._last_obstacle_check = None  # (depth msg id, result)
 
@@ -166,17 +201,21 @@ class ErGotoNode(Node):
             errors.append(f'max_angular_z must be in (0, {POLICY_MAX_ANGULAR_Z}]')
         if not 0.0 < p['walk_speed'] <= p['max_linear_x']:
             errors.append('walk_speed must be in (0, max_linear_x]')
+        if not 0.0 < p['min_walk_speed'] <= p['walk_speed']:
+            errors.append('min_walk_speed must be in (0, walk_speed]')
         if not 0.0 < p['turn_speed'] <= p['max_angular_z']:
             errors.append('turn_speed must be in (0, max_angular_z]')
-        for name in ('stop_dist', 'align_tol', 'max_step', 'min_step', 'search_turn_time',
-                     'max_motion_time', 'max_run_time', 'max_frame_age', 'watchdog_timeout',
-                     'gemini_timeout', 'publish_rate', 'startup_timeout', 'depth_scale'):
+        for name in ('stop_dist', 'align_tol', 'k_turn', 'slow_dist', 'search_turn_time',
+                     'max_blind_time', 'max_blind_dist', 'max_run_time', 'max_frame_age',
+                     'watchdog_timeout', 'gemini_timeout', 'publish_rate', 'startup_timeout',
+                     'depth_scale'):
             if not p[name] > 0.0:
                 errors.append(f'{name} must be > 0')
+        for name in ('arrive_tol', 'settle_time'):
+            if p[name] < 0.0:
+                errors.append(f'{name} must be >= 0')
         if p['turn_in_place_angle'] < p['align_tol']:
             errors.append('turn_in_place_angle must be >= align_tol')
-        if p['min_step'] > p['max_step']:
-            errors.append('min_step must be <= max_step')
         if p['publish_rate'] > 0.0 and 2.0 / p['publish_rate'] >= p['watchdog_timeout']:
             errors.append('publish_rate too low for watchdog_timeout (need 2 periods < timeout)')
         if p['obstacle_dist'] >= p['stop_dist']:
@@ -221,87 +260,43 @@ class ErGotoNode(Node):
             if i + 1 < count:
                 time.sleep(interval)
 
-    def hold_zero(self, duration):
-        """Publish zero at publish_rate for duration seconds."""
-        period = 1.0 / self.p['publish_rate']
-        end = time.monotonic() + duration
-        zero = Twist()
-        while True:
-            self._publish(zero)
-            remaining = end - time.monotonic()
-            if remaining <= 0.0:
-                return
-            time.sleep(min(period, remaining))
+    def _send(self, linear_x, angular_z):
+        """Publish one control-loop command and feed the watchdog."""
+        self._publish(self._twist(linear_x, angular_z))
+        with self._state_lock:
+            self._last_loop_publish = time.monotonic()
 
     def _watchdog_loop(self):
         while not self._watchdog_stop.wait(0.05):
             with self._state_lock:
-                stalled = (self._motion_active and time.monotonic() - self._last_motion_publish
+                stalled = (self._loop_active and time.monotonic() - self._last_loop_publish
                            > self.p['watchdog_timeout'])
                 if stalled:
-                    self._motion_active = False
+                    self._loop_active = False
                     self._watchdog_tripped = True
             if stalled:
                 self.get_logger().error(
-                    f'Watchdog: no command for {self.p["watchdog_timeout"]:.1f} s during a '
-                    'motion, publishing zero')
+                    f'Watchdog: no command for {self.p["watchdog_timeout"]:.1f} s, '
+                    'publishing zero')
                 self.publish_zero()
+
+    def _watchdog_fired(self):
+        """True once after the watchdog stopped the robot; re-arms it."""
+        with self._state_lock:
+            tripped = self._watchdog_tripped
+            if tripped:
+                self._watchdog_tripped = False
+                self._loop_active = True
+                self._last_loop_publish = time.monotonic()
+        return tripped
 
     def stop_watchdog(self):
         self._watchdog_stop.set()
 
-    def move(self, step, abort_check=None):
-        """Publish the step's velocity at publish_rate for its duration, then zero.
-
-        Returns None if the motion completed, otherwise the reason it was aborted.
-        """
-        twist = self._twist(step.linear_x, step.angular_z)
-        duration = min(step.duration, self.p['max_motion_time'])
-        period = 1.0 / self.p['publish_rate']
-        self.get_logger().info(
-            f'{step.action}: linear.x={twist.linear.x:+.2f} angular.z={twist.angular.z:+.2f} '
-            f'for {duration:.2f} s ({step.reason})')
-        aborted = None
-        start = time.monotonic()
-        end = start + duration
-        with self._state_lock:
-            self._motion_active = True
-            self._watchdog_tripped = False
-            self._last_motion_publish = start
-        try:
-            while True:
-                now = time.monotonic()
-                if now >= end:
-                    break
-                with self._state_lock:
-                    tripped = self._watchdog_tripped
-                if tripped:
-                    aborted = 'watchdog fired'
-                    break
-                if abort_check is not None:
-                    aborted = abort_check()
-                    if aborted:
-                        break
-                self._publish(twist)
-                with self._state_lock:
-                    self._last_motion_publish = time.monotonic()
-                time.sleep(min(period, max(end - time.monotonic(), 0.0)))
-        finally:
-            with self._state_lock:
-                self._motion_active = False
-            self.publish_zero()
-        elapsed = time.monotonic() - start
-        if aborted:
-            self.get_logger().warning(
-                f'{step.action} aborted after {elapsed:.2f} s: {aborted}; published zero')
-        else:
-            self.get_logger().info(f'{step.action} done after {elapsed:.2f} s; published zero')
-        return aborted
-
     # -------------------------------------------------------------- perception
 
     def _walk_abort_reason(self):
-        """Abort check while walking: stale frames or an obstacle in the corridor."""
+        """Why the robot must not walk forward now: stale frames or an obstacle in the corridor."""
         now = time.monotonic()
         depth, rgb = self._frame('depth'), self._frame('rgb')
         max_age = self.p['max_frame_age']
@@ -352,26 +347,27 @@ class ErGotoNode(Node):
         raise RuntimeError(f'nothing subscribes to {self.cmd_topic}; '
                            'start tools/start_robot.sh first')
 
-    def _fresh_frames(self, after):
-        """Newest RGB and depth frames received after `after`, plus camera_info."""
-        deadline = time.monotonic() + max(2.0, 4 * self.p['max_frame_age'])
-        while time.monotonic() < deadline:
-            rgb, depth, info = self._frame('rgb'), self._frame('depth'), self._frame('info')
-            if (rgb and depth and info and rgb.received >= after
-                    and depth.received >= after):
-                return rgb.msg, depth.msg, info.msg
-            time.sleep(0.02)
-        raise RuntimeError('camera stopped sending frames')
+    def _frames_for(self, look):
+        """RGB, depth and camera_info for a LOOK, or None until suitable frames arrive.
 
-    def look(self, iteration):
-        """Stand still, photograph, ask Gemini. Returns a LookResult, or None if the
-        target is not visible or the answer could not be parsed.
-
-        Raises GeminiError (transient) or GeminiFatalError.
+        A standing LOOK needs frames received after it was requested, when the robot
+        had settled; a moving LOOK takes the newest frames if they are fresh.
         """
-        self.hold_zero(self.p['settle_time'])
-        rgb_msg, depth_msg, info = self._fresh_frames(after=time.monotonic())
+        rgb, depth, info = self._frame('rgb'), self._frame('depth'), self._frame('info')
+        if not (rgb and depth and info):
+            return None
+        after = look.time if look.standing else time.monotonic() - self.p['max_frame_age']
+        if rgb.received < after or depth.received < after:
+            return None
+        return rgb.msg, depth.msg, info.msg
 
+    def _look(self, iteration, standing, rgb_msg, depth_msg, info):
+        """Ask Gemini where the target is in these frames; runs on a Background thread.
+
+        Returns a LookResult, or None if the target is not visible or the answer
+        could not be parsed. Raises GeminiError (transient) or GeminiFatalError.
+        """
+        name = f'LOOK {iteration} ({"standing" if standing else "moving"})'
         rgb = geometry.image_to_array(rgb_msg.encoding, rgb_msg.height, rgb_msg.width,
                                       rgb_msg.step, rgb_msg.is_bigendian, rgb_msg.data)
         bgr = geometry.to_bgr(rgb, rgb_msg.encoding)
@@ -384,15 +380,14 @@ class ErGotoNode(Node):
             points, text = self.gemini.point(jpeg.tobytes(), self.target)
         except ResponseParseError as exc:
             latency = time.monotonic() - started
-            self.get_logger().warning(
-                f'LOOK {iteration}: unusable answer ({exc}), latency {latency:.1f} s')
+            self.get_logger().warning(f'{name}: unusable answer ({exc}), latency {latency:.1f} s')
             self._save_debug(iteration, bgr, None, f'unparseable: {exc}')
             return None
         latency = time.monotonic() - started
         self.get_logger().debug(f'Gemini answer: {text}')
 
         if not points:
-            self.get_logger().info(f'LOOK {iteration}: "{self.target}" not visible, '
+            self.get_logger().info(f'{name}: "{self.target}" not visible, '
                                    f'latency {latency:.1f} s')
             self._save_debug(iteration, bgr, None, 'not visible')
             return None
@@ -413,7 +408,7 @@ class ErGotoNode(Node):
         result = LookResult(point.label, u, v, bearing, distance)
         dist_text = f'{distance:.2f} m' if distance is not None else 'unknown'
         self.get_logger().info(
-            f'LOOK {iteration}: label="{point.label}" pixel=({u}, {v}) '
+            f'{name}: label="{point.label}" pixel=({u}, {v}) '
             f'bearing={math.degrees(bearing):+.1f} deg distance={dist_text} '
             f'latency={latency:.1f} s ({len(points)} point(s))')
         self._save_debug(iteration, bgr, result, f'{latency:.1f} s')
@@ -438,7 +433,7 @@ class ErGotoNode(Node):
     # -------------------------------------------------------------- main loop
 
     def run(self):
-        """Stop-look-move until the target is reached or a limit is hit. Returns an exit code."""
+        """Walk to the target until it is reached or a limit is hit. Returns an exit code."""
         log = self.get_logger()
         p = self.p
         log.info(f'Target: "{self.target}"; publishing to {self.cmd_topic}'
@@ -450,49 +445,70 @@ class ErGotoNode(Node):
                      'Keep the gamepad in hand: Y takes control back, B pauses inference.')
 
         deadline = time.monotonic() + p['max_run_time']
-        misses = 0
+        period = 1.0 / p['publish_rate']
+        frame_timeout = max(2.0, 4 * p['max_frame_age'])
+        nav = control.Navigator(self.tuning, time.monotonic(), log=log.info)
+        wanted = None   # (Look, requested at) waiting for suitable frames
+        running = None  # (Look, iteration, Background) waiting for Gemini
+        looks = 0
         api_errors = 0
-        for iteration in range(1, p['max_iterations'] + 1):
-            if time.monotonic() > deadline:
-                log.error(f'Gave up: max_run_time {p["max_run_time"]:.0f} s reached')
-                return EXIT_FAILED
+        with self._state_lock:
+            self._loop_active = True
+            self._last_loop_publish = time.monotonic()
+        try:
+            while True:
+                now = time.monotonic()
+                if now > deadline:
+                    raise control.GaveUp(f'max_run_time {p["max_run_time"]:.0f} s reached')
+                if self._watchdog_fired():
+                    nav.stop(now, 'watchdog fired')
 
-            try:
-                found = self.look(iteration)
-            except GeminiError as exc:
-                api_errors += 1
-                log.error(f'LOOK {iteration}: {exc} ({api_errors}/{p["max_api_errors"]}); '
-                          'standing still')
-                if api_errors >= p['max_api_errors']:
-                    log.error('Gave up: too many consecutive Gemini errors')
-                    return EXIT_FAILED
-                continue
-            api_errors = 0
+                if running is not None and running[2].done():
+                    look, iteration, task = running
+                    running = None
+                    try:
+                        found = task.result()
+                    except GeminiError as exc:
+                        api_errors += 1
+                        log.error(f'LOOK {iteration}: {exc} '
+                                  f'({api_errors}/{p["max_api_errors"]})')
+                        if api_errors >= p['max_api_errors']:
+                            raise control.GaveUp('too many consecutive Gemini errors') from exc
+                        nav.failed(look)
+                    else:
+                        api_errors = 0
+                        if found is None:
+                            nav.missed(look, now)
+                        else:
+                            nav.seen(look, found.bearing, found.distance, now)
 
-            if found is None:
-                misses += 1
-                if misses >= p['max_search']:
-                    log.error(f'Gave up: "{self.target}" not found after {misses} looks')
-                    return EXIT_FAILED
-                self.move(control.search_step(self.tuning))
-                continue
-            misses = 0
+                command = nav.tick(now, self._walk_abort_reason)
+                if command.done:
+                    log.info(f'Arrived at "{self.target}"')
+                    return EXIT_OK
+                if command.look is not None:
+                    wanted = (command.look, now)
+                if wanted is not None:
+                    frames = self._frames_for(wanted[0])
+                    if frames is not None:
+                        if looks >= p['max_iterations']:
+                            raise control.GaveUp(f'max_iterations {p["max_iterations"]} reached')
+                        looks += 1
+                        look = wanted[0]
+                        running = (look, looks, Background(self._look, looks, look.standing,
+                                                           *frames))
+                        wanted = None
+                    elif now - wanted[1] > frame_timeout:
+                        raise RuntimeError('camera stopped sending frames')
 
-            step = control.decide(found.bearing, found.distance, self.tuning)
-            if step.action == control.DONE:
-                log.info(f'Arrived at "{self.target}": {step.reason}')
-                return EXIT_OK
-            if step.action == control.WALK:
-                reason = self._walk_abort_reason()
-                if reason:
-                    log.error(f'Cannot walk: {reason}')
-                    return EXIT_FAILED
-                self.move(step, abort_check=self._walk_abort_reason)
-            else:
-                self.move(step)
-
-        log.error(f'Gave up: max_iterations {p["max_iterations"]} reached')
-        return EXIT_FAILED
+                self._send(command.linear_x, command.angular_z)
+                time.sleep(max(period - (time.monotonic() - now), 0.0))
+        except control.GaveUp as exc:
+            log.error(f'Gave up: {exc}')
+            return EXIT_FAILED
+        finally:
+            with self._state_lock:
+                self._loop_active = False
 
 
 def _report(node, message, warning=False):
