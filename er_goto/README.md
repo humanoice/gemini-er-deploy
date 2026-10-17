@@ -16,16 +16,16 @@ Gemini never outputs velocities: local code turns its point into motion. A LOOK 
 
 | Path | Purpose |
 | --- | --- |
-| `er_goto/node.py` | ROS node: camera subscriptions, `/cmd_vel` publisher, state machine, watchdog, signal handling |
+| `er_goto/node.py` | ROS node: camera subscriptions, `/cmd_vel` publisher, state machine, watchdog, signal handling, `er_goto>` prompt |
 | `er_goto/gemini_client.py` | Gemini call with timeout and retry, JSON parsing (code fences), `[y, x]` to pixel |
 | `er_goto/geometry.py` | Image decoding, pixel to bearing/distance, obstacle check (pure functions) |
-| `er_goto/control.py` | Dead reckoning, pursuit law, STAND / PURSUE / SEARCH state machine (`Navigator`), command-to-target parsing (no ROS) |
+| `er_goto/control.py` | Dead reckoning, pursuit law, STAND / PURSUE / SEARCH state machine (`Navigator`), prompt and command-to-target parsing (no ROS) |
 | `config/realsense_d435i_rgbd.yaml` | RealSense config: colour on, depth aligned to colour, 640x480 at 15 fps |
 | `config/params.yaml` | All tunables |
-| `launch/er_goto.launch.py` | Starts the node with `params.yaml`; `target`, `dry_run`, `save_debug_images` arguments |
+| `launch/er_goto.launch.py` | One target, then exit: starts the node with `params.yaml`; `target`, `dry_run`, `save_debug_images` arguments |
 | `scripts/snapshot_test.py` | Offline: Gemini on saved photos, draws the points, prints latency |
 | `test/` | Unit tests for geometry, parsing and decisions |
-| `../tools/start_er_goto.sh` | Sets the DDS environment, builds, starts the camera in `screen`, runs the node |
+| `../tools/start_er_goto.sh` | Sets the DDS environment, builds, starts the camera in `screen`, runs the node with the `er_goto>` prompt |
 
 ## Setup on the RDK X5
 
@@ -48,8 +48,19 @@ Avoid `pip install opencv-python` on the robot: it pulls numpy 2, which breaks R
 
 ```bash
 ./tools/start_robot.sh                     # default policy, as usual
-./tools/start_er_goto.sh chair             # or: ./tools/start_er_goto.sh walk to the red chair
+./tools/start_er_goto.sh                   # opens the er_goto> prompt
 ```
+
+Type where to go at the prompt; the node stays running between commands:
+
+```
+er_goto> go to the black chair     # walks there and stops in front of it
+er_goto> walk to the lady          # next target, after arrival or mid-walk
+er_goto> stop                      # stand still and wait (also: halt, s)
+er_goto> quit                      # or Ctrl+D: stand still and exit (also: exit, q)
+```
+
+A command typed while the robot walks replaces the current target: the robot stops, looks for the new one and heads there. Between commands the node publishes zero once and then nothing, so the robot stands. **Ctrl+C** stops the robot and exits at any time. `help` repeats the commands. Log lines print over the prompt; you can type anyway. Words after the options run as the first command: `./tools/start_er_goto.sh walk to the red chair`.
 
 Then, on the gamepad:
 
@@ -57,14 +68,17 @@ Then, on the gamepad:
 2. Press **Y** to hand control to `/cmd_vel`. Until then the robot ignores `er_goto`.
 3. Keep the gamepad in hand. **Y** takes control back instantly; **B** pauses inference.
 
-The node exits when it arrives or gives up. The camera keeps running in `er_camera_session` for the next command; stop it with `screen -S er_camera_session -X quit`. Do not run `tools/start_camera.sh` at the same time: it opens the same camera with the parkour config (the script refuses to start if it is running).
+When a target is reached or the node gives up, it waits for the next command. The camera keeps running in `er_camera_session` after the script exits; stop it with `screen -S er_camera_session -X quit`. Do not run `tools/start_camera.sh` at the same time: it opens the same camera with the parkour config (the script refuses to start if it is running).
 
-Options: `--dry-run` publishes to `/cmd_vel_test` (robot not needed), `--debug-images` saves each LOOK frame with the Gemini point to `~/er_goto_debug/<time>/`, `--restart-camera` restarts the camera session.
+Options: `--dry-run` publishes to `/cmd_vel_test` (robot not needed), `--debug-images` saves each LOOK frame with the Gemini point to `~/er_goto_debug/<time>-<target>/`, one folder per command, `--restart-camera` restarts the camera session.
 
 Without the script, after sourcing ROS, `install/setup.bash` and the DDS variables from `start_robot.sh`:
 
 ```bash
 ros2 launch realsense2_camera rs_launch.py config_file:=$PWD/er_goto/config/realsense_d435i_rgbd.yaml
+# prompt (ros2 run, because ros2 launch does not pass the terminal's input to the node):
+ros2 run er_goto er_goto_node --ros-args --params-file $PWD/er_goto/config/params.yaml -p interactive:=true -p dry_run:=true
+# one target, then exit:
 ros2 launch er_goto er_goto.launch.py target:=chair dry_run:=true save_debug_images:=true
 ```
 
@@ -75,10 +89,10 @@ ros2 launch er_goto er_goto.launch.py target:=chair dry_run:=true save_debug_ima
 - publishes from one control loop at `publish_rate`; Gemini runs on a daemon thread and never publishes, and exiting never waits for it;
 - runs a watchdog thread that publishes zero if the control loop stops publishing for `watchdog_timeout`; the loop then stands and looks again;
 - walks on one answer for at most `max_blind_time` seconds since its photo and `max_blind_dist` metres, then stands and asks again;
-- publishes zero on normal exit, on any exception and on SIGINT/SIGTERM/SIGHUP;
+- publishes zero on normal exit, on any exception and on SIGINT/SIGTERM/SIGHUP, and at the prompt after every command (arrived, gave up, error, `stop`, or replaced by a new command); a new target always starts with a standing LOOK;
 - clamps commands to `max_linear_x` / `max_angular_z`, which must stay inside the `default` policy clamps (0.6 m/s, 0.8 rad/s);
 - checks on every tick that walks forward for an obstacle (anything closer than `obstacle_dist` in the centre third / lower two thirds of the depth image, or too few valid depth pixels) and for RGB or depth frames older than `max_frame_age`; a blocked path stops the robot for a standing LOOK, and the run gives up if it is still blocked, unless that LOOK shows the robot has arrived;
-- on a Gemini timeout or error (`gemini_timeout`, `gemini_retries`) keeps going on the newest answer within those limits, asks again, and gives up after `max_api_errors` failures in a row; a rejected request (bad key, unknown model) stops the run;
+- on a Gemini timeout or error (`gemini_timeout`, `gemini_retries`) keeps going on the newest answer within those limits, asks again, and gives up after `max_api_errors` failures in a row; a rejected request (bad key, unknown model) stops the run and returns to the prompt;
 - caps the run with `max_iterations`, `max_search` and `max_run_time`, and logs every LOOK (standing or moving, label, pixel, bearing, distance, latency), every stop with its reason, and the command after each answer.
 
 Dead reckoning assumes the robot moves as commanded. A humanoid usually covers less, so the robot stops a little short and the standing LOOK sends it on; the blind limits bound how far an error can grow. It also ignores the gait's response lag, so a robot that tracks commands closely can coast up to about 0.15 m past `stop_dist`; `obstacle_dist` is the backstop. An answer is used until the next one arrives, so both limits must cover two Gemini latencies (`max_blind_time` > 2 x latency, `max_blind_dist` > `walk_speed` x 2 x latency), or the robot stops on every answer.
@@ -95,8 +109,8 @@ Each stage must pass before the next; never skip to the floor test.
 | --- | --- | --- |
 | 1. Unit tests | Laptop, no ROS: `cd er_goto && python3 -m pytest test` | All pass |
 | 2. Snapshot | Laptop, saved room photos: `python3 er_goto/scripts/snapshot_test.py --target chair photos/*.jpg` | Chair marked correctly on 5 of 5 photos; median latency recorded |
-| 3. Camera dry run | RDK X5 + camera, robot off: `./tools/start_er_goto.sh --dry-run --debug-images chair` | Holding the camera, bearing sign and distance (within about 15 % of a tape measure) are correct; commands stream at about `publish_rate` on `/cmd_vel_test` only (`ros2 topic hz /cmd_vel_test`). Nothing moves, so dead reckoning drifts: expect PURSUE / STAND cycles rather than DONE |
-| 4. Crane | Robot hanging, default policy running, Y pressed | Legs step in the commanded direction and keep stepping while Gemini thinks; Ctrl+C mid-walk returns the legs to stepping in place; `kill -9` mid-walk keeps the last command until the operator presses Y |
+| 3. Camera dry run | RDK X5 + camera, robot off: `./tools/start_er_goto.sh --dry-run --debug-images chair` | Holding the camera, bearing sign and distance (within about 15 % of a tape measure) are correct; commands stream at about `publish_rate` on `/cmd_vel_test` only (`ros2 topic hz /cmd_vel_test`). Nothing moves, so dead reckoning drifts: expect PURSUE / STAND cycles rather than DONE. Typing `walk to the lady` mid-run logs `Leaving "chair"`, stands and looks for the lady (new debug folder); `stop` publishes zero and `/cmd_vel_test` goes quiet; `quit`, Ctrl+D and Ctrl+C exit and the terminal still echoes |
+| 4. Crane | Robot hanging, default policy running, Y pressed | Legs step in the commanded direction and keep stepping while Gemini thinks; Ctrl+C or `stop` mid-walk returns the legs to stepping in place, and a new target typed mid-walk stops them before turning; `kill -9` mid-walk keeps the last command until the operator presses Y |
 | 5. Floor | Open area, chair 2-3 m away, operator holding the gamepad | Robot walks without stopping between answers and ends 0.8 m (± 0.2 m) in front of the chair; also with the chair starting 90 deg to the side |
 
 In stage 5, `STAND: walked ... since the newest fix` or `STAND: newest fix is ... old` on most answers means Gemini is slower than the blind limits allow: raise them a little or lower `walk_speed`. If the robot often stops well short or overshoots turns, the gait follows commands less closely than dead reckoning assumes; integrating the D435i gyro (`enable_gyro` in `realsense_d435i_rgbd.yaml`) for yaw would be the next step. If the robot turns the wrong way in stage 4, fix the sign in `geometry.pixel_to_bearing` and rerun stage 3. If the camera is not mounted facing straight ahead, set `camera_yaw_offset` (rad, + = camera turned left). The math assumes a roughly level camera: if it is pitched down at the floor, distances read long and the floor itself can trip the obstacle check, so check both in stage 3 and tune `stop_dist` / `obstacle_dist`. If `distance` is often unknown (thin chair legs), a later improvement is to ask Gemini for a bounding box and take depth from its lower centre.

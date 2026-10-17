@@ -8,9 +8,14 @@ robot stops only to confirm arrival, when the newest answer is too old, when the
 path is blocked, and to search. Velocities go to /cmd_vel, which inference_node
 holds forever, so the node publishes zero on exit and a watchdog covers a
 stalled control loop.
+
+With interactive:=true the node reads commands from the terminal instead of
+exiting on arrival; a command typed during a walk replaces the current target.
 """
 
 import math
+import queue
+import re
 import signal
 import sys
 import threading
@@ -25,6 +30,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
+from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import CameraInfo, Image
 
 from er_goto import control, geometry
@@ -41,6 +47,7 @@ EXIT_STOPPED = 130
 PARAMETERS = {
     # Runtime flags
     'target': '',
+    'interactive': False,
     'dry_run': False,
     'save_debug_images': False,
     'debug_dir': '~/er_goto_debug',
@@ -91,6 +98,14 @@ PARAMETERS = {
 
 class StopRequested(BaseException):
     """Raised from the signal handler; BaseException so library code cannot swallow it."""
+
+
+class NewCommand(Exception):
+    """A command was typed while walking; it replaces the current target."""
+
+    def __init__(self, line):
+        super().__init__(line)
+        self.line = line
 
 
 @dataclass
@@ -144,7 +159,8 @@ class ErGotoNode(Node):
         self._validate_parameters()
 
         p = self.p
-        self.target = control.extract_target(p['target'])
+        self.commands = queue.Queue()  # prompt lines, interactive mode
+        self._told_operator = False
         self.tuning = control.Tuning(
             stop_dist=p['stop_dist'], arrive_tol=p['arrive_tol'], align_tol=p['align_tol'],
             turn_in_place_angle=p['turn_in_place_angle'], k_turn=p['k_turn'],
@@ -178,12 +194,6 @@ class ErGotoNode(Node):
             model=p['model'], thinking_level=p['thinking_level'],
             timeout=p['gemini_timeout'], retries=p['gemini_retries'])
 
-        self.debug_dir = None
-        if p['save_debug_images']:
-            stamp = time.strftime('%Y%m%d-%H%M%S')
-            self.debug_dir = Path(p['debug_dir']).expanduser() / stamp
-            self.debug_dir.mkdir(parents=True, exist_ok=True)
-
         self._watchdog_stop = threading.Event()
         self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._watchdog.start()
@@ -193,7 +203,7 @@ class ErGotoNode(Node):
     def _validate_parameters(self):
         p = self.p
         errors = []
-        if not control.extract_target(p['target']):
+        if not p['interactive'] and not control.extract_target(p['target']):
             errors.append('target is empty (e.g. target:=chair)')
         if not 0.0 < p['max_linear_x'] <= POLICY_MAX_LINEAR_X:
             errors.append(f'max_linear_x must be in (0, {POLICY_MAX_LINEAR_X}]')
@@ -326,15 +336,20 @@ class ErGotoNode(Node):
                                         msg.is_bigendian, msg.data)
         return geometry.depth_to_meters(depth, self.p['depth_scale'])
 
-    def wait_for_camera(self):
-        """Wait until colour, depth and camera_info have all arrived."""
+    def wait_for_camera(self, max_age=2.0):
+        """Wait until colour, depth and camera_info have all arrived within max_age s."""
         deadline = time.monotonic() + self.p['startup_timeout']
         topics = {'rgb': 'color_topic', 'depth': 'depth_topic', 'info': 'camera_info_topic'}
+
+        def fresh(key):
+            frame = self._frame(key)
+            return frame is not None and time.monotonic() - frame.received <= max_age
+
         while time.monotonic() < deadline:
-            if all(self._frame(k) is not None for k in topics):
+            if all(fresh(k) for k in topics):
                 return
             time.sleep(0.1)
-        missing = [self.p[t] for k, t in topics.items() if self._frame(k) is None]
+        missing = [self.p[t] for k, t in topics.items() if not fresh(k)]
         raise RuntimeError(f'no data on {", ".join(missing)}; is the camera running?')
 
     def wait_for_robot(self):
@@ -361,8 +376,8 @@ class ErGotoNode(Node):
             return None
         return rgb.msg, depth.msg, info.msg
 
-    def _look(self, iteration, standing, rgb_msg, depth_msg, info):
-        """Ask Gemini where the target is in these frames; runs on a Background thread.
+    def _look(self, target, debug_dir, iteration, standing, rgb_msg, depth_msg, info):
+        """Ask Gemini where target is in these frames; runs on a Background thread.
 
         Returns a LookResult, or None if the target is not visible or the answer
         could not be parsed. Raises GeminiError (transient) or GeminiFatalError.
@@ -377,19 +392,19 @@ class ErGotoNode(Node):
 
         started = time.monotonic()
         try:
-            points, text = self.gemini.point(jpeg.tobytes(), self.target)
+            points, text = self.gemini.point(jpeg.tobytes(), target)
         except ResponseParseError as exc:
             latency = time.monotonic() - started
             self.get_logger().warning(f'{name}: unusable answer ({exc}), latency {latency:.1f} s')
-            self._save_debug(iteration, bgr, None, f'unparseable: {exc}')
+            self._save_debug(debug_dir, target, iteration, bgr, None, f'unparseable: {exc}')
             return None
         latency = time.monotonic() - started
         self.get_logger().debug(f'Gemini answer: {text}')
 
         if not points:
-            self.get_logger().info(f'{name}: "{self.target}" not visible, '
+            self.get_logger().info(f'{name}: "{target}" not visible, '
                                    f'latency {latency:.1f} s')
-            self._save_debug(iteration, bgr, None, 'not visible')
+            self._save_debug(debug_dir, target, iteration, bgr, None, 'not visible')
             return None
 
         point = points[0]
@@ -411,11 +426,11 @@ class ErGotoNode(Node):
             f'{name}: label="{point.label}" pixel=({u}, {v}) '
             f'bearing={math.degrees(bearing):+.1f} deg distance={dist_text} '
             f'latency={latency:.1f} s ({len(points)} point(s))')
-        self._save_debug(iteration, bgr, result, f'{latency:.1f} s')
+        self._save_debug(debug_dir, target, iteration, bgr, result, f'{latency:.1f} s')
         return result
 
-    def _save_debug(self, iteration, bgr, result, note):
-        if self.debug_dir is None:
+    def _save_debug(self, debug_dir, target, iteration, bgr, result, note):
+        if debug_dir is None:
             return
         image = bgr.copy()
         if result is not None:
@@ -424,25 +439,37 @@ class ErGotoNode(Node):
             cv2.drawMarker(image, (result.u, result.v), (0, 0, 255), cv2.MARKER_CROSS, 24, 1)
             note = (f'{result.label} {math.degrees(result.bearing):+.1f}deg {dist_text} '
                     f'| {note}')
-        cv2.putText(image, f'#{iteration} {self.target}: {note}', (8, 22),
+        cv2.putText(image, f'#{iteration} {target}: {note}', (8, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
-        path = self.debug_dir / f'look_{iteration:03d}.jpg'
+        path = debug_dir / f'look_{iteration:03d}.jpg'
         if not cv2.imwrite(str(path), image):
             self.get_logger().warning(f'Could not write {path}')
 
     # -------------------------------------------------------------- main loop
 
-    def run(self):
-        """Walk to the target until it is reached or a limit is hit. Returns an exit code."""
+    def run(self, target, poll_command=lambda: None):
+        """Walk to target until it is reached or a limit is hit. Returns an exit code.
+
+        poll_command() is called every tick and returns a newly typed command or
+        None; a command ends the walk with NewCommand.
+        """
         log = self.get_logger()
         p = self.p
-        log.info(f'Target: "{self.target}"; publishing to {self.cmd_topic}'
+        log.info(f'Target: "{target}"; publishing to {self.cmd_topic}'
                  f'{" (dry run)" if p["dry_run"] else ""}')
         self.wait_for_camera()
         if not p['dry_run']:
             self.wait_for_robot()
-            log.info('The robot moves only after Y was pressed on the gamepad. '
-                     'Keep the gamepad in hand: Y takes control back, B pauses inference.')
+            if not self._told_operator:
+                self._told_operator = True
+                log.info('The robot moves only after Y was pressed on the gamepad. '
+                         'Keep the gamepad in hand: Y takes control back, B pauses inference.')
+
+        debug_dir = None
+        if p['save_debug_images']:
+            name = time.strftime('%Y%m%d-%H%M%S') + '-' + re.sub(r'\W+', '_', target)[:40]
+            debug_dir = Path(p['debug_dir']).expanduser() / name
+            debug_dir.mkdir(parents=True, exist_ok=True)
 
         deadline = time.monotonic() + p['max_run_time']
         period = 1.0 / p['publish_rate']
@@ -460,6 +487,9 @@ class ErGotoNode(Node):
                 now = time.monotonic()
                 if now > deadline:
                     raise control.GaveUp(f'max_run_time {p["max_run_time"]:.0f} s reached')
+                line = poll_command()
+                if line is not None:
+                    raise NewCommand(line)
                 if self._watchdog_fired():
                     nav.stop(now, 'watchdog fired')
 
@@ -484,7 +514,7 @@ class ErGotoNode(Node):
 
                 command = nav.tick(now, self._walk_abort_reason)
                 if command.done:
-                    log.info(f'Arrived at "{self.target}"')
+                    log.info(f'Arrived at "{target}"')
                     return EXIT_OK
                 if command.look is not None:
                     wanted = (command.look, now)
@@ -495,8 +525,8 @@ class ErGotoNode(Node):
                             raise control.GaveUp(f'max_iterations {p["max_iterations"]} reached')
                         looks += 1
                         look = wanted[0]
-                        running = (look, looks, Background(self._look, looks, look.standing,
-                                                           *frames))
+                        running = (look, looks, Background(self._look, target, debug_dir, looks,
+                                                           look.standing, *frames))
                         wanted = None
                     elif now - wanted[1] > frame_timeout:
                         raise RuntimeError('camera stopped sending frames')
@@ -509,6 +539,64 @@ class ErGotoNode(Node):
         finally:
             with self._state_lock:
                 self._loop_active = False
+
+
+HELP = ('Type where to go, e.g. "go to the black chair". A new command replaces the current '
+        'target, "stop" halts the robot, "quit" or Ctrl+D exits, Ctrl+C stops the robot and exits.')
+
+
+def _read_commands(commands):
+    """Put terminal lines on commands; runs on a daemon thread. Ctrl+D quits."""
+    while True:
+        try:
+            line = input('er_goto> ')
+        except EOFError:
+            commands.put('quit')
+            return
+        if line.strip():
+            commands.put(line)
+
+
+def repl(node, first_line=''):
+    """Walk to each typed target until "quit". Returns an exit code."""
+    log = node.get_logger()
+    log.info(HELP)
+    threading.Thread(target=_read_commands, args=(node.commands,), daemon=True).start()
+
+    def poll_command():
+        try:
+            return node.commands.get_nowait()
+        except queue.Empty:
+            return None
+
+    pending = first_line.strip() or None
+    while True:
+        line, pending = pending, None
+        while line is None:  # with a timeout, so that a signal is handled promptly
+            try:
+                line = node.commands.get(timeout=0.5)
+            except queue.Empty:
+                pass
+        action, target = control.parse_command(line)
+        if action == 'quit':
+            return EXIT_OK
+        if action == 'help':
+            log.info(HELP)
+        elif action == 'stop':
+            node.publish_zero()
+            log.info('Stopped. Waiting for the next command')
+        elif action == 'go':
+            try:
+                node.run(target, poll_command)
+            except NewCommand as exc:
+                log.info(f'Leaving "{target}" for: {exc.line}')
+                pending = exc.line
+            except Exception as exc:  # GeminiFatalError, camera loss, ...
+                log.error(f'{type(exc).__name__}: {exc}')
+            finally:
+                node.publish_zero(count=10)
+            if pending is None:
+                log.info('Waiting for the next command')
 
 
 def _report(node, message, warning=False):
@@ -543,7 +631,11 @@ def main(args=None):
         executor = SingleThreadedExecutor()
         executor.add_node(node)
         threading.Thread(target=executor.spin, daemon=True).start()
-        exit_code = node.run()
+        if node.p['interactive']:
+            # A first command may follow the executable: er_goto_node walk to the chair --ros-args
+            exit_code = repl(node, ' '.join(remove_ros_args(args)[1:]) or node.p['target'])
+        else:
+            exit_code = node.run(control.extract_target(node.p['target']))
     except StopRequested as exc:
         exit_code = EXIT_STOPPED
         _report(node, f'{exc} received, stopping', warning=True)

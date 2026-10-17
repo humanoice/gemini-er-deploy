@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Start the RealSense RGB-D camera for er_goto (once) and walk the robot to a target.
+# Start the RealSense RGB-D camera for er_goto (once) and walk the robot to typed targets.
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -20,18 +20,22 @@ print_error() {
 }
 
 show_usage() {
-    echo "Usage: $0 [--dry-run] [--debug-images] [--restart-camera] TARGET..."
+    echo "Usage: $0 [--dry-run] [--debug-images] [--restart-camera] [FIRST COMMAND...]"
     echo
-    echo "Walks the robot to TARGET using Gemini Robotics-ER and the RealSense camera."
+    echo "Opens an er_goto> prompt: type where to go, e.g. \"go to the black chair\", and the robot"
+    echo "walks there using Gemini Robotics-ER and the RealSense camera. Type the next target"
+    echo "whenever you like; a command typed while walking replaces the current target."
+    echo "\"stop\" halts the robot, \"quit\" or Ctrl+D exits, Ctrl+C stops the robot and exits."
+    echo
     echo "Run tools/start_robot.sh (default policy) first; after this script starts,"
-    echo "press Y on the gamepad to hand control to /cmd_vel. Ctrl+C stops the robot."
+    echo "press Y on the gamepad to hand control to /cmd_vel."
     echo
     echo "  --dry-run         publish to /cmd_vel_test instead of /cmd_vel (robot not needed)"
     echo "  --debug-images    save each LOOK frame with the Gemini point to ~/er_goto_debug"
     echo "  --restart-camera  restart the er_camera_session camera before running"
     echo
-    echo "Example: $0 chair"
-    echo "Example: $0 --dry-run walk to the red chair"
+    echo "Example: $0"
+    echo "Example: $0 --dry-run walk to the red chair   # runs this first, then prompts"
 }
 
 wait_for_node() {
@@ -134,13 +138,6 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
-
-TARGET="${TARGET_WORDS[*]}"
-if [ -z "$TARGET" ]; then
-    print_error "Missing TARGET"
-    show_usage
-    exit 1
-fi
 
 cd "$(dirname "$0")"
 cd ..
@@ -257,6 +254,11 @@ else
     print_success "----------------------------------------"
 fi
 
-print_info "Target: $TARGET"
-print_info "Camera keeps running for the next command; stop it with: screen -S $CAMERA_SESSION -X quit"
-ros2 launch er_goto er_goto.launch.py "target:=$TARGET" "dry_run:=$DRY_RUN" "save_debug_images:=$DEBUG_IMAGES"
+print_info "Camera keeps running after exit; stop it with: screen -S $CAMERA_SESSION -X quit"
+# ros2 run, not ros2 launch: launch does not pass the terminal's stdin to the node.
+# The first command goes in as plain arguments; -p would parse it as YAML.
+ros2 run er_goto er_goto_node "${TARGET_WORDS[@]}" --ros-args \
+    --params-file "$(pwd)/er_goto/config/params.yaml" \
+    -p interactive:=true \
+    -p "dry_run:=$DRY_RUN" \
+    -p "save_debug_images:=$DEBUG_IMAGES"

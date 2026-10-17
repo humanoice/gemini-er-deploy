@@ -15,7 +15,7 @@
 
 开源地址：[Roboparty/roboparty_deploy](https://github.com/Roboparty/roboparty_deploy)。维护者：RoboParty；支持渠道：GitHub Issues。
 
-本分支新增 `er_goto`：输入“walk to the chair”（走到椅子前）这样的文字指令，机器人借助 RDK X5 主控上的 Google Gemini Robotics-ER 和 Intel RealSense D435i 找到目标物体并走过去。见[走到椅子前](#走到椅子前)。
+本分支新增 `er_goto`：在提示符下输入“walk to the chair”（走到椅子前）这样的文字指令，机器人借助 RDK X5 主控上的 Google Gemini Robotics-ER 和 Intel RealSense D435i 找到目标物体并走过去。见[走到椅子前](#走到椅子前)。
 
 ## 文档导航
 
@@ -70,28 +70,37 @@ cp .env.example .env                           # 然后在 .env 中填写 GEMINI
    ./tools/start_robot.sh
    ```
 
-3. 终端 2：运行 `er_goto`，参数可以是完整英文指令，也可以只写物体名称。
+3. 终端 2：启动 `er_goto`。
 
    ```bash
-   ./tools/start_er_goto.sh walk to the chair
-   ./tools/start_er_goto.sh red chair near the window
+   ./tools/start_er_goto.sh
    ```
 
-   脚本会构建 `er_goto`，在 `er_camera_session` screen 会话中启动相机，检查相机数据流和 `inference_node`，然后启动节点。
+   脚本会构建 `er_goto`，在 `er_camera_session` screen 会话中启动相机，检查相机数据流和 `inference_node`，然后启动节点并显示 `er_goto>` 提示符。
 4. 脚本打印交接提示后，按手柄 **Y** 键。按 Y 切换为 `/cmd_vel` 控制之前，机器人不会执行 `er_goto` 的指令。
-5. 机器人观察、转向椅子，并以每次最多 1 m 的步长前进。它会停在椅子前约 0.8 m 处，节点输出 `Arrived at "chair"` 后退出。若转动约一整圈仍未找到椅子，节点会放弃并停止机器人。
+5. 输入要去的地方，可以是完整英文指令，也可以只写物体名称：
+
+   ```
+   er_goto> go to the black chair
+   er_goto> walk to the lady
+   er_goto> stop
+   er_goto> quit
+   ```
+
+   机器人转向目标，并在 Gemini 持续观察的同时前进。它会停在目标前约 0.8 m 处，输出 `Arrived at "black chair"`，然后等待下一条指令。若转动约一整圈仍未找到目标，节点会放弃、停止机器人并等待下一条指令。机器人行走途中输入的新指令会替换当前目标：机器人先停下，寻找新目标，再走过去。`stop` 让机器人停下并等待；`quit` 或 Ctrl+D 让机器人停下并退出。
 6. 再按一次 **Y**，将控制权交回手柄。
 
-整个过程中操作员必须手持手柄。**Y** 立即收回控制权，**B** 暂停推理，在终端 2 按 Ctrl+C 会让机器人停下。如果 `er_goto` 被强制结束而没有清理，机器人会保持最后一条 `/cmd_vel` 指令，此时只能靠 Y 收回控制。相机画面会发送到 Google Gemini API。
+整个过程中操作员必须手持手柄。**Y** 立即收回控制权，**B** 暂停推理，在终端 2 按 Ctrl+C 会让机器人停下并退出。如果 `er_goto` 被强制结束而没有清理，机器人会保持最后一条 `/cmd_vel` 指令，此时只能靠 Y 收回控制。相机画面会发送到 Google Gemini API。
 
 常用选项：
 
 | 命令 | 作用 |
 | --- | --- |
-| `./tools/start_er_goto.sh --dry-run chair` | 发布到 `/cmd_vel_test` 而非 `/cmd_vel`；无需启动机器人 |
-| `./tools/start_er_goto.sh --debug-images chair` | 将每帧相机图像连同 Gemini 标注点保存到 `~/er_goto_debug/` |
-| `./tools/start_er_goto.sh --restart-camera chair` | 运行前重启相机会话 |
-| `screen -S er_camera_session -X quit` | 停止相机（相机在多次指令之间保持运行） |
+| `./tools/start_er_goto.sh walk to the chair` | 先执行这条指令，再显示提示符 |
+| `./tools/start_er_goto.sh --dry-run` | 发布到 `/cmd_vel_test` 而非 `/cmd_vel`；无需启动机器人 |
+| `./tools/start_er_goto.sh --debug-images` | 将每帧相机图像连同 Gemini 标注点保存到 `~/er_goto_debug/<时间>-<目标>/` |
+| `./tools/start_er_goto.sh --restart-camera` | 运行前重启相机会话 |
+| `screen -S er_camera_session -X quit` | 停止相机（脚本退出后相机仍保持运行） |
 
 不要同时运行 `./tools/start_camera.sh`，它会以 parkour 配置打开同一台相机。首次地面测试前，请按 [er_goto/README.md](er_goto/README.md#test-plan) 中的分阶段测试计划进行：单元测试、照片测试、相机空跑，然后吊装测试。
 

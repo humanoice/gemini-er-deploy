@@ -347,6 +347,27 @@ def test_extract_target(command, target):
     assert control.extract_target(command) == target
 
 
+@pytest.mark.parametrize('line, parsed', [
+    ('go to the black chair', ('go', 'black chair')),
+    ('walk to the lady', ('go', 'lady')),
+    ('chair', ('go', 'chair')),
+    ('  Stop. ', ('stop', None)),
+    ('halt', ('stop', None)),
+    ('s', ('stop', None)),
+    ('QUIT', ('quit', None)),
+    ('exit', ('quit', None)),
+    ('q', ('quit', None)),
+    ('help', ('help', None)),
+    ('?', ('help', None)),
+    ('', (None, None)),
+    ('   ', (None, None)),
+    ('.', (None, None)),
+    ('stop sign', ('go', 'stop sign')),
+])
+def test_parse_command(line, parsed):
+    assert control.parse_command(line) == parsed
+
+
 def test_bearing_wraps():
     point = control.place(control.Pose(0.0, 0.0, 3.0), bearing=0.3, distance=1.0)
     bearing, _ = control.locate(control.Pose(0.0, 0.0, 3.0), point)

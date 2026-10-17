@@ -2,6 +2,9 @@
 """Run er_goto with config/params.yaml.
 
 ros2 launch er_goto er_goto.launch.py target:=chair [dry_run:=true] [save_debug_images:=true]
+
+One target, then exit. The interactive prompt (tools/start_er_goto.sh) runs the node
+with ros2 run instead, because launch does not pass the terminal's stdin to it.
 """
 
 from launch import LaunchDescription

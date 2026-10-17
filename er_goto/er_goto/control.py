@@ -28,6 +28,11 @@ _COMMAND_PREFIX = re.compile(
     r'(?:the\s+)?',
     re.IGNORECASE)
 
+# Prompt words that are not targets (parse_command).
+QUIT_WORDS = ('quit', 'exit', 'q')
+STOP_WORDS = ('stop', 'halt', 's')
+HELP_WORDS = ('help', '?')
+
 
 class GaveUp(Exception):
     """The target cannot be reached: not found, path blocked, or a run limit hit."""
@@ -327,3 +332,23 @@ def extract_target(command):
     """'walk to the red chair.' -> 'red chair'; a bare target is returned unchanged."""
     target = _COMMAND_PREFIX.sub('', command, count=1)
     return target.strip().rstrip('.!?').strip()
+
+
+def parse_command(line):
+    """One prompt line -> (action, target).
+
+    action is 'quit', 'stop', 'help', 'go' (target set) or None for a blank line.
+    """
+    word = line.strip().rstrip('.!').strip().lower()
+    if not word:
+        return None, None
+    if word in QUIT_WORDS:
+        return 'quit', None
+    if word in STOP_WORDS:
+        return 'stop', None
+    if word in HELP_WORDS:
+        return 'help', None
+    target = extract_target(line)
+    if not target:
+        return None, None
+    return 'go', target

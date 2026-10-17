@@ -15,7 +15,7 @@ The repository provides complete deployment code with a modular architecture tha
 
 Repository: [Roboparty/roboparty_deploy](https://github.com/Roboparty/roboparty_deploy). Maintainer: RoboParty. Support: GitHub Issues.
 
-This fork adds `er_goto`, which takes a text command such as "walk to the chair" and walks RPO to that object. The object is located with Google Gemini Robotics-ER and an Intel RealSense D435i on the RDK X5 controller. See [Walk to the Chair](#walk-to-the-chair).
+This fork adds `er_goto`, which takes text commands typed at a prompt, such as "walk to the chair", and walks RPO to each object. The object is located with Google Gemini Robotics-ER and an Intel RealSense D435i on the RDK X5 controller. See [Walk to the Chair](#walk-to-the-chair).
 
 ## Documentation
 
@@ -70,28 +70,37 @@ Do not `pip install opencv-python`: it pulls numpy 2, which breaks ROS Humble's 
    ./tools/start_robot.sh
    ```
 
-3. Terminal 2: run `er_goto` with the command or just the object.
+3. Terminal 2: start `er_goto`.
 
    ```bash
-   ./tools/start_er_goto.sh walk to the chair
-   ./tools/start_er_goto.sh red chair near the window
+   ./tools/start_er_goto.sh
    ```
 
-   The script builds `er_goto`, starts the camera in the `er_camera_session` screen session, checks the camera streams and `inference_node`, and then starts the node.
+   The script builds `er_goto`, starts the camera in the `er_camera_session` screen session, checks the camera streams and `inference_node`, and then starts the node with an `er_goto>` prompt.
 4. When the script prints the hand-over reminder, press **Y** on the gamepad. The robot ignores `er_goto` until Y switches it to `/cmd_vel` control.
-5. The robot looks, turns toward the chair, and walks in steps of up to 1 m. It stops about 0.8 m in front of the chair, and the node exits with `Arrived at "chair"`. It gives up and stops if the chair is not found after about one full turn.
+5. Type where to go, as a command or just the object:
+
+   ```
+   er_goto> go to the black chair
+   er_goto> walk to the lady
+   er_goto> stop
+   er_goto> quit
+   ```
+
+   The robot turns toward the target and walks while Gemini keeps looking. It stops about 0.8 m in front of the target, logs `Arrived at "black chair"`, and waits for the next command. It gives up, stops, and waits if the target is not found after about one full turn. A command typed while the robot walks replaces the current target: the robot stops, looks for the new one, and heads there. `stop` halts the robot and waits; `quit` or Ctrl+D stops it and exits.
 6. Press **Y** again to return control to the gamepad.
 
-Keep the gamepad in hand during the whole run. **Y** takes control back instantly, **B** pauses inference, and Ctrl+C in terminal 2 stops the robot. The robot keeps the last `/cmd_vel` command if `er_goto` is killed without cleanup, so Y is the fallback. Camera frames are sent to Google's Gemini API.
+Keep the gamepad in hand during the whole run. **Y** takes control back instantly, **B** pauses inference, and Ctrl+C in terminal 2 stops the robot and exits. The robot keeps the last `/cmd_vel` command if `er_goto` is killed without cleanup, so Y is the fallback. Camera frames are sent to Google's Gemini API.
 
 Useful options:
 
 | Command | Purpose |
 | --- | --- |
-| `./tools/start_er_goto.sh --dry-run chair` | Publish to `/cmd_vel_test` instead of `/cmd_vel`; the robot does not need to run |
-| `./tools/start_er_goto.sh --debug-images chair` | Save each camera frame with the Gemini point drawn to `~/er_goto_debug/` |
-| `./tools/start_er_goto.sh --restart-camera chair` | Restart the camera session before running |
-| `screen -S er_camera_session -X quit` | Stop the camera, which keeps running between commands |
+| `./tools/start_er_goto.sh walk to the chair` | Run this command first, then show the prompt |
+| `./tools/start_er_goto.sh --dry-run` | Publish to `/cmd_vel_test` instead of `/cmd_vel`; the robot does not need to run |
+| `./tools/start_er_goto.sh --debug-images` | Save each camera frame with the Gemini point drawn to `~/er_goto_debug/<time>-<target>/` |
+| `./tools/start_er_goto.sh --restart-camera` | Restart the camera session before running |
+| `screen -S er_camera_session -X quit` | Stop the camera, which keeps running after the script exits |
 
 Do not run `./tools/start_camera.sh` at the same time; it opens the same camera with the parkour configuration. Before the first floor run, follow the staged test plan in [er_goto/README.md](er_goto/README.md#test-plan): unit tests, saved photos, camera dry run, then the robot on a crane.
 
