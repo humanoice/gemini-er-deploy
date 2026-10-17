@@ -69,6 +69,7 @@ verify_topic_stream() {
     local label=$2
     local attempt
     local hz_line
+    local hz_output
 
     if ! wait_for_topic "$topic" 15; then
         print_error "$label topic missing: $topic"
@@ -77,15 +78,21 @@ verify_topic_stream() {
     fi
 
     for ((attempt = 1; attempt <= 2; ++attempt)); do
-        hz_line=$(timeout 4 ros2 topic hz "$topic" 2>&1 | grep -m 1 "average rate")
+        # ROS CLI initialization and DDS discovery can exceed four seconds on the X5.
+        # Capture the complete probe so an early grep exit cannot break its output pipe.
+        hz_output=$(PYTHONUNBUFFERED=1 timeout --signal=INT --kill-after=5s 15s ros2 topic hz "$topic" 2>&1)
+        hz_line=$(grep -m 1 "average rate" <<< "$hz_output")
         if [ -n "$hz_line" ]; then
             print_success "$label stream OK ($hz_line)"
             return 0
         fi
     done
 
-    print_error "$label topic exists but no data arrives: $topic"
-    print_info "Check the camera log: screen -r $CAMERA_SESSION"
+    print_error "$label topic exists but the stream check timed out or failed: $topic"
+    if [ -n "$hz_output" ]; then
+        printf '%s\n' "$hz_output"
+    fi
+    print_info "Check the camera log: $CAMERA_LOG (or screen -r $CAMERA_SESSION)"
     return 1
 }
 
@@ -140,6 +147,7 @@ cd ..
 
 CAMERA_SESSION="er_camera_session"
 CAMERA_CONFIG="$(pwd)/er_goto/config/realsense_d435i_rgbd.yaml"
+CAMERA_LOG="$(pwd)/log/er_camera_session.log"
 COLOR_TOPIC="/camera/camera/color/image_raw"
 DEPTH_TOPIC="/camera/camera/aligned_depth_to_color/image_raw"
 
@@ -222,11 +230,13 @@ if session_running "$CAMERA_SESSION"; then
 else
     print_info "Starting $CAMERA_SESSION (RealSense RGB-D)..."
     print_info "RealSense config: $CAMERA_CONFIG"
-    screen -dmS "$CAMERA_SESSION" bash -c "source install/setup.bash; export RMW_IMPLEMENTATION='$RMW_IMPLEMENTATION'; export RMW_FASTRTPS_USE_QOS_FROM_XML='$RMW_FASTRTPS_USE_QOS_FROM_XML'; export FASTRTPS_DEFAULT_PROFILES_FILE='$FASTRTPS_DEFAULT_PROFILES_FILE'; ros2 launch realsense2_camera rs_launch.py config_file:='$CAMERA_CONFIG'; exec bash"
+    mkdir -p "$(dirname "$CAMERA_LOG")"
+    screen -dmS "$CAMERA_SESSION" bash -c "source install/setup.bash; export RMW_IMPLEMENTATION='$RMW_IMPLEMENTATION'; export RMW_FASTRTPS_USE_QOS_FROM_XML='$RMW_FASTRTPS_USE_QOS_FROM_XML'; export FASTRTPS_DEFAULT_PROFILES_FILE='$FASTRTPS_DEFAULT_PROFILES_FILE'; ros2 launch realsense2_camera rs_launch.py config_file:='$CAMERA_CONFIG' 2>&1 | tee '$CAMERA_LOG'; exec bash"
 
     if ! wait_for_node "^/camera/camera$" 15; then
-        print_error "RealSense did not start. Check: 1) D435i on USB 3  2) lsusb | grep 8086  3) screen -r $CAMERA_SESSION"
-        screen -S "$CAMERA_SESSION" -X quit 2>/dev/null
+        print_error "RealSense did not start. Startup output: $CAMERA_LOG"
+        print_info "Inspect: screen -r $CAMERA_SESSION"
+        print_info "After fixing the error, retry with --restart-camera."
         exit 1
     fi
 fi
