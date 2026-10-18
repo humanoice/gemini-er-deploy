@@ -19,7 +19,7 @@ er_goto:
     k_turn: 1.5                  # 1/s, angular.z = k_turn * bearing, capped at turn_speed
     turn_speed: 0.5              # rad/s, fastest turn, also the SEARCH rotation
     walk_speed: 0.35             # m/s, fastest walk
-    min_walk_speed: 0.15         # m/s, slowest walk, so the gait still steps forward
+    min_walk_speed: 0.3          # m/s, slowest walk; the gait stepped in place at 0.15-0.22, walked at 0.3
     slow_dist: 0.5               # m, slow down over this last stretch before stop_dist
     settle_time: 0.3             # s standing still before a standing LOOK
     search_turn_time: 1.5        # s per SEARCH rotation (~43 deg at 0.5 rad/s)

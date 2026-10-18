@@ -72,7 +72,7 @@ PARAMETERS = {
     'k_turn': 1.5,
     'turn_speed': 0.5,
     'walk_speed': 0.35,
-    'min_walk_speed': 0.15,
+    'min_walk_speed': 0.3,
     'slow_dist': 0.5,
     'settle_time': 0.3,
     'search_turn_time': 1.5,
