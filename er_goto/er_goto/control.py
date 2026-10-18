@@ -22,6 +22,10 @@ SEARCH = 'SEARCH'
 # walking barely changes its bearing.
 UNRANGED_DISTANCE = 5.0
 
+# m, a shorter dead-reckoned walk between standing LOOKs is within depth noise,
+# so progress is judged only once the walks add up to this (Navigator._check_progress).
+STALL_MIN_WALK = 0.2
+
 _COMMAND_PREFIX = re.compile(
     r'^\s*(?:please\s+)?'
     r'(?:(?:walk|go|move|head|navigate|come)\s+(?:over\s+)?(?:up\s+to|to|towards|toward)\s+)?'
@@ -54,6 +58,8 @@ class Tuning:
     max_search: int             # standing LOOKs in a row without the target before giving up
     max_blind_time: float       # s, stop if the newest fix's photo is older
     max_blind_dist: float       # m, stop after walking this far since the newest fix's photo
+    min_progress: float         # fraction of the dead-reckoned walk a standing LOOK must confirm
+    max_stalls: int             # standing LOOKs in a row confirming less before giving up, 0 = off
 
 
 @dataclass(frozen=True)
@@ -165,7 +171,9 @@ class Navigator:
             still in flight resumes PURSUE when it shows the target ahead, but
             only finishes the run if its photo was taken within arrive_tol /
             (align_tol / 2) of where the robot stopped. After a blocked path,
-            only a standing LOOK decides.
+            only a standing LOOK decides. A standing LOOK that shows the robot
+            got less than min_progress of its dead-reckoned walk closer is a
+            stall; max_stalls in a row give up, as the gait is not walking.
     PURSUE  walk / turn toward the fix, with moving LOOKs back to back. Back to
             STAND when dead reckoning says arrived, the fix is older than
             max_blind_time or max_blind_dist, the path is blocked, or stop().
@@ -185,6 +193,8 @@ class Navigator:
         self._looking = False
         self._latency = 0.0    # s, from request to answer of the latest LOOK
         self._misses = 0
+        self._anchor = None    # (distance, path) of the standing LOOK progress is judged from
+        self._stalls = 0
         self._blocked = False  # last stop was for a blocked path
         self._report = False   # log the next PURSUE command
         self._search_until = 0.0
@@ -280,7 +290,10 @@ class Navigator:
         self._stand(now, reason)
 
     def seen(self, look, bearing, distance, now):
-        """A LOOK found the target at bearing / distance (m, None = unknown) from look.pose."""
+        """A LOOK found the target at bearing / distance (m, None = unknown) from look.pose.
+
+        Raises GaveUp when standing LOOKs show the robot is not walking.
+        """
         self._looking = False
         self._latency = now - look.time
         self._misses = 0
@@ -300,8 +313,40 @@ class Navigator:
             self.mode = DONE
             self._log(f'DONE: {distance:.2f} m away, bearing {math.degrees(bearing):+.1f} deg')
             return
+        if look.standing and distance is not None:
+            self._check_progress(look.path, distance)
         self.mode = PURSUE
         self._report = True
+
+    def _check_progress(self, path, distance):
+        """Compare a standing LOOK at path / distance with the one progress is judged from.
+
+        Dead reckoning trusts the published velocities, so a gait that steps in
+        place reaches stop_dist on paper every cycle, until depth noise passes
+        for arrival. Raises GaveUp after max_stalls stalls in a row.
+        """
+        t = self.t
+        if t.max_stalls == 0:
+            return
+        if self._anchor is None:
+            self._anchor = (distance, path)
+            return
+        anchor_distance, anchor_path = self._anchor
+        walked = path - anchor_path
+        if walked < STALL_MIN_WALK:
+            return  # keep the anchor until the walks add up
+        self._anchor = (distance, path)
+        closer = anchor_distance - distance
+        if closer >= t.min_progress * walked:
+            self._stalls = 0
+            return
+        self._stalls += 1
+        self._log(f'STALL: walked {walked:.2f} m by dead reckoning, measured {closer:+.2f} m '
+                  f'closer ({self._stalls}/{t.max_stalls})')
+        if self._stalls >= t.max_stalls:
+            raise GaveUp(f'robot is not walking as commanded ({closer:+.2f} m closer after '
+                         f'{walked:.2f} m by dead reckoning); check that Y gave /cmd_vel control '
+                         'and that min_walk_speed is fast enough for the gait')
 
     def _near(self, look):
         """Whether look's photo was taken about where the robot stands now."""
@@ -318,6 +363,8 @@ class Navigator:
         if self._misses >= self.t.max_search:
             raise GaveUp(f'target not found after {self._misses} standing looks')
         self._fix = None
+        self._anchor = None  # the next sighting may be another object
+        self._stalls = 0
         self._blocked = False
         self.mode = SEARCH
         self._search_until = now + self.t.search_turn_time

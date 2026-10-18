@@ -11,7 +11,7 @@ from er_goto import control
 TUNING = control.Tuning(stop_dist=0.8, arrive_tol=0.15, align_tol=0.15, turn_in_place_angle=0.5,
                         k_turn=1.5, turn_speed=0.5, walk_speed=0.35, min_walk_speed=0.15,
                         slow_dist=1.0, settle_time=0.3, search_turn_time=1.5, max_search=3,
-                        max_blind_time=10.0, max_blind_dist=2.5)
+                        max_blind_time=10.0, max_blind_dist=2.5, min_progress=0.3, max_stalls=2)
 
 DT = 0.05
 
@@ -117,6 +117,16 @@ def standing_look(nav, start=0.0):
             return now, command.look
         now += DT
         assert now < start + 5.0
+
+
+def walk_until_standing_look(nav, start):
+    """Tick a PURSUE until dead reckoning stops it for a standing LOOK; returns (time, look)."""
+    now = start
+    while nav.mode == control.PURSUE:
+        assert nav.tick(now, clear).look is None  # no moving LOOK in flight
+        now += DT
+        assert now < start + 30.0
+    return standing_look(nav, now)
 
 
 def pursuing(bearing, distance, tuning=TUNING, latency=3.0):
@@ -313,6 +323,53 @@ def test_search_then_give_up():
     now, look = standing_look(nav, now)
     with pytest.raises(control.GaveUp, match='not found'):
         nav.missed(look, now)
+
+
+def test_gives_up_when_the_robot_does_not_walk():
+    nav, now = pursuing(0.0, 1.12)  # the logged run: the gait stepped in place
+    now, look = walk_until_standing_look(nav, now)
+    assert nav.path == pytest.approx(0.32, abs=0.01)
+    nav.seen(look, bearing=0.0, distance=1.08, now=now + 3.0)
+    assert nav.mode == control.PURSUE
+    now, look = walk_until_standing_look(nav, now + 3.0)
+    with pytest.raises(control.GaveUp, match='not walking'):
+        nav.seen(look, bearing=0.0, distance=1.12, now=now + 3.0)
+
+
+def test_short_walks_add_up_before_judging_progress():
+    nav, now = pursuing(0.0, 0.97)  # 0.17 m per walk, within depth noise
+    for _ in range(3):  # stall only on the second, after 0.34 m
+        now, look = walk_until_standing_look(nav, now)
+        nav.seen(look, bearing=0.0, distance=0.97, now=now + 3.0)
+        now += 3.0
+    now, look = walk_until_standing_look(nav, now)
+    with pytest.raises(control.GaveUp, match='not walking'):
+        nav.seen(look, bearing=0.0, distance=0.97, now=now + 3.0)
+
+
+def test_progress_resets_stalls():
+    nav, now = pursuing(0.0, 1.12)
+    for distance in (1.08, 0.97, 0.97, 0.96):  # stall, 0.11 m of 0.28 m, short walk, stall
+        now, look = walk_until_standing_look(nav, now)
+        nav.seen(look, bearing=0.0, distance=distance, now=now + 3.0)
+        now += 3.0
+    assert nav.mode == control.PURSUE
+
+
+def test_arrival_beats_a_stall():
+    nav, now = pursuing(0.0, 1.12, dataclasses.replace(TUNING, min_progress=1.0, max_stalls=1))
+    now, look = walk_until_standing_look(nav, now)
+    nav.seen(look, bearing=0.0, distance=0.95, now=now + 3.0)  # 0.17 m of 0.32 m, but arrived
+    assert nav.tick(now + 3.0, clear).done
+
+
+def test_zero_max_stalls_turns_the_progress_check_off():
+    nav, now = pursuing(0.0, 1.12, dataclasses.replace(TUNING, max_stalls=0))
+    for _ in range(4):
+        now, look = walk_until_standing_look(nav, now)
+        nav.seen(look, bearing=0.0, distance=1.12, now=now + 3.0)
+        now += 3.0
+    assert nav.mode == control.PURSUE
 
 
 def test_unranged_fix_walks_on_bearing():

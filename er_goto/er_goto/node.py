@@ -66,7 +66,7 @@ PARAMETERS = {
     'jpeg_quality': 90,
     # Control
     'stop_dist': 0.8,
-    'arrive_tol': 0.2,
+    'arrive_tol': 0.1,
     'align_tol': 0.15,
     'turn_in_place_angle': 0.5,
     'k_turn': 1.5,
@@ -77,6 +77,8 @@ PARAMETERS = {
     'settle_time': 0.3,
     'search_turn_time': 1.5,
     'max_search': 10,
+    'min_progress': 0.3,
+    'max_stalls': 2,
     'max_iterations': 40,
     'camera_yaw_offset': 0.0,
     'depth_patch_radius': 5,
@@ -168,7 +170,8 @@ class ErGotoNode(Node):
             min_walk_speed=p['min_walk_speed'], slow_dist=p['slow_dist'],
             settle_time=p['settle_time'], search_turn_time=p['search_turn_time'],
             max_search=p['max_search'], max_blind_time=p['max_blind_time'],
-            max_blind_dist=p['max_blind_dist'])
+            max_blind_dist=p['max_blind_dist'], min_progress=p['min_progress'],
+            max_stalls=0 if p['dry_run'] else p['max_stalls'])  # nothing walks in a dry run
 
         self._pub_lock = threading.RLock()  # re-entrant: the signal handler path may nest
         self._state_lock = threading.Lock()
@@ -224,6 +227,10 @@ class ErGotoNode(Node):
         for name in ('arrive_tol', 'settle_time'):
             if p[name] < 0.0:
                 errors.append(f'{name} must be >= 0')
+        if not 0.0 <= p['min_progress'] <= 1.0:
+            errors.append('min_progress must be in [0, 1]')
+        if p['max_stalls'] < 0:
+            errors.append('max_stalls must be >= 0')
         if p['turn_in_place_angle'] < p['align_tol']:
             errors.append('turn_in_place_angle must be >= align_tol')
         if p['publish_rate'] > 0.0 and 2.0 / p['publish_rate'] >= p['watchdog_timeout']:

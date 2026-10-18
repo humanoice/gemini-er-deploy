@@ -13,7 +13,7 @@ er_goto:
 
     # Look-while-walking loop
     stop_dist: 0.8               # m, walk until this far in front of the target
-    arrive_tol: 0.2              # m, a standing LOOK within stop_dist + this counts as arrived
+    arrive_tol: 0.1              # m, a standing LOOK within stop_dist + this counts as arrived
     align_tol: 0.15              # rad (~9 deg), arrived only when aligned within this
     turn_in_place_angle: 0.5     # rad (~29 deg), turn in place above this, else turn while walking
     k_turn: 1.5                  # 1/s, angular.z = k_turn * bearing, capped at turn_speed
@@ -24,6 +24,8 @@ er_goto:
     settle_time: 0.3             # s standing still before a standing LOOK
     search_turn_time: 1.5        # s per SEARCH rotation (~43 deg at 0.5 rad/s)
     max_search: 10               # standing LOOKs in a row without the target before giving up
+    min_progress: 0.3            # a standing LOOK must show the robot this fraction of its dead-reckoned walk closer
+    max_stalls: 2                # standing LOOKs in a row showing less before giving up; 0 = off (always off in a dry run)
     max_iterations: 40           # hard cap on Gemini LOOKs
     camera_yaw_offset: 0.0       # rad, camera mounting yaw (+ = camera turned left)
     depth_patch_radius: 5        # px, median depth patch around the Gemini point
