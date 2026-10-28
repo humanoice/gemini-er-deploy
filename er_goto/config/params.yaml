@@ -12,7 +12,7 @@ er_goto:
     max_api_errors: 3            # consecutive failed LOOKs before giving up
 
     # Look-while-walking loop
-    stop_dist: 0.8               # m, walk until this far in front of the target
+    stop_dist: 0.5               # m, walk until this far in front of the target
     arrive_tol: 0.1              # m, a standing LOOK within stop_dist + this counts as arrived
     align_tol: 0.15              # rad (~9 deg), arrived only when aligned within this
     turn_in_place_angle: 0.5     # rad (~29 deg), turn in place above this, else turn while walking
@@ -39,5 +39,5 @@ er_goto:
     max_run_time: 300.0          # s, total run time limit
     max_frame_age: 0.5           # s, no walking if depth or RGB is older
     watchdog_timeout: 0.5        # s without a command from the control loop -> zero
-    obstacle_dist: 0.5           # m, stop walking if anything is closer in the corridor
+    obstacle_dist: 0.0           # m, stop walking if anything is closer in the corridor; 0 = off
     obstacle_min_depth: 0.1      # m, ignore depth readings below this

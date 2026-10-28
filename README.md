@@ -46,7 +46,7 @@ Inference reads motor and IMU state through the robot interface, converts policy
 
 ## Walk to the Chair
 
-`er_goto` walks while it looks. Gemini Robotics-ER points at the chair in the camera image on a background thread, and local code turns that point into a bearing and a distance from the aligned depth image. Between answers the robot keeps walking toward the newest one, corrected by dead reckoning for how far it moved since that photo was taken. It stops only to confirm arrival, to look again when the answer is too old or the path is blocked, and to search, and ends about 0.8 m in front of the chair.
+`er_goto` walks while it looks. Gemini Robotics-ER points at the chair in the camera image on a background thread, and local code turns that point into a bearing and a distance from the aligned depth image. Between answers the robot keeps walking toward the newest one, corrected by dead reckoning for how far it moved since that photo was taken. It stops only to confirm arrival, to look again when the answer is too old or the path is blocked, and to search, and ends about 0.5 m in front of the chair.
 
 ### One-time Setup on the RDK X5
 
@@ -87,7 +87,7 @@ Do not `pip install opencv-python`: it pulls numpy 2, which breaks ROS Humble's 
    er_goto> quit
    ```
 
-   The robot turns toward the target and walks while Gemini keeps looking. It stops about 0.8 m in front of the target, logs `Arrived at "black chair"`, and waits for the next command. It gives up, stops, and waits if the target is not found after about one full turn. A command typed while the robot walks replaces the current target: the robot stops, looks for the new one, and heads there. `stop` halts the robot and waits; `quit` or Ctrl+D stops it and exits.
+   The robot turns toward the target and walks while Gemini keeps looking. It stops about 0.5 m in front of the target, logs `Arrived at "black chair"`, and waits for the next command. It gives up, stops, and waits if the target is not found after about one full turn. A command typed while the robot walks replaces the current target: the robot stops, looks for the new one, and heads there. `stop` halts the robot and waits; `quit` or Ctrl+D stops it and exits.
 6. Press **Y** again to return control to the gamepad.
 
 Keep the gamepad in hand during the whole run. **Y** takes control back instantly, **B** pauses inference, and Ctrl+C in terminal 2 stops the robot and exits. The robot keeps the last `/cmd_vel` command if `er_goto` is killed without cleanup, so Y is the fallback. Camera frames are sent to Google's Gemini API.

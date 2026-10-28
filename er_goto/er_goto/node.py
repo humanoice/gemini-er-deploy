@@ -65,7 +65,7 @@ PARAMETERS = {
     'max_api_errors': 3,
     'jpeg_quality': 90,
     # Control
-    'stop_dist': 0.8,
+    'stop_dist': 0.5,
     'arrive_tol': 0.1,
     'align_tol': 0.15,
     'turn_in_place_angle': 0.5,
@@ -92,7 +92,7 @@ PARAMETERS = {
     'max_run_time': 300.0,
     'max_frame_age': 0.5,
     'watchdog_timeout': 0.5,
-    'obstacle_dist': 0.5,
+    'obstacle_dist': 0.0,
     'obstacle_min_depth': 0.1,
     'startup_timeout': 10.0,
 }
@@ -235,7 +235,7 @@ class ErGotoNode(Node):
             errors.append('turn_in_place_angle must be >= align_tol')
         if p['publish_rate'] > 0.0 and 2.0 / p['publish_rate'] >= p['watchdog_timeout']:
             errors.append('publish_rate too low for watchdog_timeout (need 2 periods < timeout)')
-        if p['obstacle_dist'] >= p['stop_dist']:
+        if p['obstacle_dist'] > 0.0 and p['obstacle_dist'] >= p['stop_dist']:
             errors.append('obstacle_dist must be < stop_dist, or the target blocks the last step')
         for name in ('max_search', 'max_iterations', 'max_api_errors'):
             if p[name] < 1:
@@ -313,7 +313,10 @@ class ErGotoNode(Node):
     # -------------------------------------------------------------- perception
 
     def _walk_abort_reason(self):
-        """Why the robot must not walk forward now: stale frames or an obstacle in the corridor."""
+        """Why the robot must not walk forward now: stale frames or an obstacle in the corridor.
+
+        The obstacle check is off when obstacle_dist is 0.
+        """
         now = time.monotonic()
         depth, rgb = self._frame('depth'), self._frame('rgb')
         max_age = self.p['max_frame_age']
@@ -321,10 +324,11 @@ class ErGotoNode(Node):
             return f'depth frames older than {max_age:.1f} s'
         if rgb is None or now - rgb.received > max_age:
             return f'RGB frames older than {max_age:.1f} s'
-        blocked, nearest = self._obstacle(depth.msg)
-        if blocked:
-            where = f'{nearest:.2f} m' if nearest is not None else 'too close / no depth'
-            return f'obstacle in path ({where})'
+        if self.p['obstacle_dist'] > 0.0:
+            blocked, nearest = self._obstacle(depth.msg)
+            if blocked:
+                where = f'{nearest:.2f} m' if nearest is not None else 'too close / no depth'
+                return f'obstacle in path ({where})'
         return None
 
     def _obstacle(self, depth_msg):
